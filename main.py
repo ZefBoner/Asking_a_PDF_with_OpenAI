@@ -1,52 +1,111 @@
-#Se instalan las dependencias necesarias
+##Se instalan las dependencias necesarias
 """
 
-#!pip install openai PyPDF2 tiktoken
+#!pip install pypdf2 tiktoken openai
 
-"""
-## Aqui se importaran librerias y se definiran variables que se usaran a lo largo del codigo"""
+"""##Se importan las librerias necesarias."""
 
-import PyPDF2
+import pandas as pd
+import csv, os, PyPDF2, tiktoken, openai, io, requests
 import numpy as np
-import tiktoken
-import openai
-from scipy.spatial.distance import cosine
+from openai.embeddings_utils import distances_from_embeddings
+
+"""##Definimos la clave privada para la conexion con openai, ademas de definir los tokenizer"""
 
 openai.api_key = ""
-document = 'file.pdf' #Liga del PDF
-max_tokens = 300
+# Load the cl100k_base tokenizer which is designed to work with the ada-002 model
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
-"""### La siguiente funcion es para saber de cuantas tokens se compone un texto"""
+# Verificar si el archivo CSV existe
+if os.path.exists('pdf_data.csv'):
+    # Leer el archivo CSV y cargar los datos en un DataFrame de Pandas
+    pdf_df = pd.read_csv('pdf_data.csv')
+else:
+    # Si el archivo no existe, crear un DataFrame vacío de Pandas
+    pdf_df = pd.DataFrame(columns=['Nombre de archivo', 'Contenido de texto'])
 
-def num_tokens_from_string(string: str, encoding_name: str) -> int:
-    """Returns the number of tokens in a text string."""
-    encoding = tiktoken.get_encoding(encoding_name)
-    num_tokens = len(encoding.encode(string))
-    return num_tokens
+"""##Funcion recursiva para preguntar al usuario si subira un archivo o seleccionara una url"""
 
-"""### La siguiente funcion es para escribir en un arreglo el contenido del PDF por paginas donde [[pagina]...[pagina_n]]:"""
+def url_o_cargar():
+  res = input('Escribe \'url\' si el archivo PDF a interactuar esta en una url de google drive, o \'cargar\' si se cargara el documento:  ')
+  if res.lower() == 'url' or res.lower() == 'cargar':
+    return res.lower()
+  else:
+    print('Tu seleccion no es valida, selecciona entre \'url\' o \'cargar\'')
+    url_o_cargar()
 
-def obtener_contenido_paginas(documento):
-    with open(documento, 'rb') as pdf_file:
-        pdf = PyPDF2.PdfReader(pdf_file)
-        contenido_paginas = []
-        for page_num in range(len(pdf.pages)):
-            contenido = pdf.pages[page_num].extract_text()
-            if contenido:
-                # Agregar el contenido de la página como una sola cadena
-                contenido_paginas.append(contenido.replace('\n', ''))
-            else:
-                # Agregar una cadena vacía si no hay contenido en la página
-                contenido_paginas.append('')
-        return contenido_paginas
+"""##Funcion para transformar una url de google drive con un pdf a texto"""
 
-"""### La siguiente funcion es para seprar en trozos un fragmento de texto dependiendo si excede o no un numero maximo de tokens dado"""
+def pdf_to_text_google_drive(url):
+  file_id = url.split("/")[-2]
+  response = requests.get(f"https://drive.google.com/uc?id={file_id}&export=download")
+  pdf_file = io.BytesIO(response.content)# Se escribe en binario el contenido de response
 
+  pdf_reader = PyPDF2.PdfReader(pdf_file) 
+  text = ''
+  for page in range(len(pdf_reader.pages)):
+    text += pdf_reader.pages[page].extract_text()
+  return text
+
+"""##Funcion para transformar un pdf a texto"""
+
+def text_to_pdf(pdf_path):
+  with open(pdf_path, 'rb') as f:
+    pdf_reader = PyPDF2.PdfReader(f)
+    text = ''
+    for page in range(len(pdf_reader.pages)):
+      text += pdf_reader.pages[page].extract_text()
+  return text
+
+"""##Aqui se definen los valores de texto y de url de ser necesario"""
+
+url_o_local = url_o_cargar()
+if url_o_local == 'url':
+  url = input('Introduce la url del pdf, SOLO URL GOOGLE DRIVE: ')
+  nombre_archivo = input('Introduce el nombre del archivo PDF:  ')
+  text = pdf_to_text_google_drive(url)
+else:
+  nombre_archivo = input('Introduce el nombre del archivo pdf ya cargado(con extension):  ')
+  text = text_to_pdf(nombre_archivo)
+
+"""Se agregan los valores anteriores al csv creado al principio"""
+
+# Agregar una nueva fila al DataFrame
+#pdf_df = pdf_df.append({'Nombre de archivo': nombre_archivo, 'Contenido de texto': text}, ignore_index=True)
+pdf_df = pd.concat([pdf_df, pd.DataFrame({'Nombre de archivo': [nombre_archivo], 'Contenido de texto': [text]})], ignore_index=True)
+
+pdf_df.head()
+
+# Guardar los datos actualizados en el archivo CSV
+pdf_df.to_csv('pdf_data.csv', index=False)
+
+# Leer el archivo CSV con los datos cargados
+df = pd.read_csv('pdf_data.csv')
+
+# Tokenizar el texto y guardar el número de tokens en una nueva columna
+df['n_tokens'] = df['Contenido de texto'].apply(lambda x: len(tokenizer.encode(x)))
+
+# Visualizar la distribución del número de tokens por fila usando un histograma
+df['n_tokens'].hist()
+
+"""##Funcion para hacer limpieza de un string"""
+
+def remove_newlines(serie):
+    serie = serie.str.replace('\n', ' ')
+    serie = serie.str.replace('\\n', ' ')
+    serie = serie.str.replace('  ', ' ')
+    serie = serie.str.replace('  ', ' ')
+    return serie
+
+"""##Dividimos el texto en la columna de texto generado en diferentes filas con su respectivo numero de tokens"""
+
+max_tokens = 1000
+
+# Function to split the text into chunks of a maximum number of tokens
 def split_into_many(text, max_tokens = max_tokens):
 
     # Split the text into sentences
-    sentences = text.split('.')
+    sentences = text.split('. ')
 
     # Get the number of tokens for each sentence
     n_tokens = [len(tokenizer.encode(" " + sentence)) for sentence in sentences]
@@ -76,98 +135,119 @@ def split_into_many(text, max_tokens = max_tokens):
         tokens_so_far += token + 1
 
     return chunks
-
-"""#### Una vez definidas estas funciones, debemos convertir el documento a la lista de 2 dimensiones, y en otra lista (shortened) agregaremos todos los strings que no superen el numero maximo de tokens, y los que lleguen a superar el numero maximo de tokens se pasara a la funcion split_into_many para que se parta y luego se agrege a la lista shortened
-
-
-"""
-
-contenido_paginas = obtener_contenido_paginas(document) #Se crea arreglo para cada pagina
-shortened= []
-
-# Iterar para cada pagina y si rebasa el max tokens se dividira en pedasos mas pequenios
-for i in range(len(contenido_paginas)):
-  if num_tokens_from_string(contenido_paginas[i], "cl100k_base") > max_tokens:
-    shortened += split_into_many(contenido_paginas[i])
-  else:
-    shortened.append(contenido_paginas[i])
-
-"""### Ya que tenemos una lista con un numero de tokens abajo de nuestro maximo de tokens, debemos crear los embedding de cada elemento en shortened
-
-### Estos embeddings vienen en formato JSON, por lo que para saber el resultado del vector resultante y este lo agregaremos a nuestro arreglo embeddings_pdf
-
-## Este proceso se repetira para cada elemento que hay en la lista shortened
-"""
-
-# Crear una lista para almacenar los embeddings de cada fragmento
-embeddings_pdf = []
-
-# Iterar sobre cada fragmento de texto y crear un embedding para cada uno
-for chunk in shortened:
-    # Crear un embedding del fragmento de texto actual
-    embedding = openai.Embedding.create(
-        model="text-embedding-ada-002",
-        input=chunk, 
-        temperature=0.5,
-        max_tokens=1024
-    )
     
-    # Obtener el vector de embeddings del fragmento de texto actual
-    vector = np.array(embedding['data'][0]['embedding']) 
-    # Agregar el vector de embeddings a la lista de embeddings
-    embeddings_pdf.append(vector)
 
-"""### Una vez teniendo nuestros embeddings agregados a embeddings_pdf, los comvertiremos a una matriz para que sea mas facil su manipulacion mas adelante."""
+shortened = []
 
-# Convertir la lista de embeddings en una matriz NumPy
-embeddings_pdf = np.array(embeddings_pdf)
+# Loop through the dataframe
+for row in df.iterrows():
 
-"""### Una vez teniendo los embeddings del PDF, necesitaremos los embeddings de la entrada del usuario para poderlos comparar"""
+    # If the text is None, go to the next row
+    if row[1]['Contenido de texto'] is None:
+        continue
 
-#Entrada del usuario, pregunta respecto al PDF
-input_text = input('Cual es tu pregunta respecto al PDF?: ')
+    # If the number of tokens is greater than the max number of tokens, split the text into chunks
+    if row[1]['n_tokens'] > max_tokens:
+        shortened += split_into_many(row[1]['Contenido de texto'])
+    
+    # Otherwise, add the text to the list of shortened texts
+    else:
+        shortened.append(row[1]['Contenido de texto'] )
 
-embedding_input = openai.Embedding.create(
-    model="text-embedding-ada-002",
-    input=input_text,
-    temperature=0.5,
-    max_tokens=1024
-)
+df = pd.DataFrame(shortened, columns = ['Contenido de texto'])
+# Tokenizar el texto y guardar el número de tokens en una nueva columna
+df['n_tokens'] = df['Contenido de texto'].apply(lambda x: len(tokenizer.encode(x)))
 
-# Obtener la matriz de embeddings del input
+# Visualizar la distribución del número de tokens por fila usando un histograma
+df['n_tokens'].hist()
 
-vector_input = np.array(embedding_input['data'][0]['embedding'])
+df.tail() #Se comprueban las ultimas 5 filas para comprobar informacion
 
-"""### Se calcula la similitud entre los dos embeddings, para encotnrar la relacion y el fragmento de texto donde se pueda encontrar la solicitud del usuario."""
+"""##Se crean embeddings para cada fraccion de texto"""
 
-# Calcular la similitud del coseno entre el vector de entrada y los vectores de los fragmentos de texto
-similarities = []
-for vector in embeddings_pdf:
-    similarity = 1 - cosine(vector, vector_input)
-    similarities.append(similarity)
+df['embeddings'] = df['Contenido de texto'].apply(lambda x: openai.Embedding.create(input=x, engine='text-embedding-ada-002')['data'][0]['embedding'])
 
-# Obtener el índice del fragmento de texto con la mayor similitud
-max_similarity_idx = np.argmax(similarities)
+df.to_csv('embeddings.csv')
+df.head()
 
-# Obtener el fragmento de texto con la mayor similitud
-most_similar_chunk = shortened[max_similarity_idx] #Si la respuesta esta entre dos chunks que pasa?
+df=pd.read_csv('embeddings.csv', index_col=0)
+df['embeddings'] = df['embeddings'].apply(eval).apply(np.array) #Los embeddings los hacemos vectores para numpy
 
-"""###Se hace la peticion para una respuesta con lenguaje natural respecto al PDF y la solicitud del usuario. Se imprime la respuesta."""
+df.head()
 
-# Generar una respuesta natural 
-response = openai.Completion.create(
-    model="text-curie-001", #text-ada-001 ada
-    prompt=f"El fragmento de texto más relevante en el PDF es: '{most_similar_chunk}'. ¿Puedes responder a mi pregunta sobre el PDF?: '{input_text}'",
-    temperature=0.5, #aleatoriedad del texto generado de 0 - 1 donde 1: mas creativo
-    max_tokens=1024, #max tokens de respuesta 
-    n=1, #cuantas respuestas diferentes se generan
-    stop=None #palabras o frases que detienen la generacion de texto
-)
+def create_context(
+    question, df, max_len=1000, size="ada"
+):
+    """
+    Create a context for a question by finding the most similar context from the dataframe
+    """
 
-# Obtener la respuesta generada del modelo
-generated_response = response['choices'][0]['text'].strip()
+    # Get the embeddings for the question
+    q_embeddings = openai.Embedding.create(input=question, engine='text-embedding-ada-002')['data'][0]['embedding']
 
-#Respuesta final
-print(generated_response)
+    # Get the distances from the embeddings
+    df['distances'] = distances_from_embeddings(q_embeddings, df['embeddings'].values, distance_metric='cosine')
 
-#Problema, no fucniona con PDF con copyrigth
+
+    returns = []
+    cur_len = 0
+
+    # Sort by distance and add the text to the context until the context is too long
+    for i, row in df.sort_values('distances', ascending=True).iterrows():
+        
+        # Add the length of the text to the current length
+        cur_len += row['n_tokens'] + 4
+        
+        # If the context is too long, break
+        if cur_len > max_len:
+            break
+        
+        # Else add it to the text that is being returned
+        returns.append(row["Contenido de texto"])
+
+    # Return the context
+    return "\n\n###\n\n".join(returns)
+
+def answer_question(
+    df,
+    model="text-davinci-003",
+    question='',
+    max_len=1800,
+    size="ada",
+    debug=False,
+    max_tokens=300,
+    stop_sequence=None
+):
+    """
+    Answer a question based on the most similar context from the dataframe texts
+    """
+    context = create_context(
+        question,
+        df,
+        max_len=max_len,
+        size=size,
+    )
+    # If debug, print the raw model response
+    if debug:
+        print("Context:\n" + context)
+        print("\n\n")
+
+    try:
+        # Create a completions using the question and context
+        response = openai.Completion.create(
+            prompt=f"Answer the question based on the context below,and if the question can't be answered based on the context, say \"I don't know\ \n\nContext: {context}\n\n---\n\nQuestion: {question}\nAnswer:",
+            temperature=0.4,
+            max_tokens=max_tokens,
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0,
+            stop=stop_sequence,
+            model=model,
+        )
+        return response["choices"][0]["text"].strip()
+    except Exception as e:
+        print(e)
+        return ""
+
+pregunta_pdf = input('Escribe tu pregunta al PDF: ')
+answer_question(df,"text-davinci-003",pregunta_pdf)
